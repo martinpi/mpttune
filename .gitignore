@@ -113,3 +113,4 @@ google-cloud-credentials.json
 .envs-dev
 .envs
 secret.yaml
+.DS_Store
