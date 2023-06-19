@@ -4,6 +4,7 @@ from typing import Dict, Any
 import torch
 from datasets import Dataset, load_dataset
 from transformers.utils import logging
+from itertools import chain
 
 logger = logging.get_logger("transformers")
 
@@ -215,6 +216,21 @@ class TrainLAIKA(TrainDataBase):
     def encode(self, examples, tokenizer, text_column_name):
         return tokenizer(examples[text_column_name])
 
+    def group_texts(self, texts, block_size):
+        # Concatenate all texts.
+        concatenated_texts = {k: list(chain(*texts[k])) for k in texts.keys()}
+        total_length = len(concatenated_texts[list(texts.keys())[0]])
+        # We drop the small remainder, we could add padding if the model supported it instead of this drop, you can
+        # customize this part to your needs.
+        if total_length >= block_size:
+            total_length = (total_length // block_size) * block_size
+        # Split by chunks of max_len.
+        result = {
+            k: [t[i: i + block_size] for i in range(0, total_length, block_size)]
+            for k, t in concatenated_texts.items()
+        }
+        result["labels"] = result["input_ids"].copy()
+        return result
 
     def prepare_dataset(self, path_to_file, tokenizer):
         # disable_progress_bar()
@@ -267,7 +283,7 @@ class TrainLAIKA(TrainDataBase):
         # https://huggingface.co/docs/datasets/package_reference/main_classes.html#datasets.Dataset.map
 
         lm_datasets: Dataset = dataset.map(
-            group_texts,
+            self.group_texts,
             batched=True,
             num_proc=PROCESSES_LIMIT,
             desc=f"Grouping texts in chunks of {block_size}",
@@ -281,39 +297,10 @@ class TrainLAIKA(TrainDataBase):
         return train_dataset, eval_dataset
 
     def prepare_data(self, use_eos_token=True, **kwargs) -> None:
-        # data = load_dataset("json", data_files=self.dataset)
-
-        # data = load_dataset(
-        #     "text", data_files=self.dataset, keep_linebreaks=True
-        # )
 
         self.train_data, self.val_data = self.prepare_dataset(
             self.dataset, self.tokenizer
         )
-
-        # if self.val_set_size > 0:
-        #     train_val = data["train"].train_test_split(
-        #         test_size=self.val_set_size, shuffle=True, seed=42)
-        #     self.train_data = train_val["train"].shuffle().map(
-        #         lambda x: self.generate_and_tokenize_prompt(x, use_eos_token=use_eos_token))
-        #     self.val_data = train_val["validation"].shuffle().map(
-        #         lambda x: self.generate_and_tokenize_prompt(x, use_eos_token=use_eos_token))
-        # else:
-        #     self.train_data = data["train"].shuffle().map(
-        #         lambda x: self.generate_and_tokenize_prompt(x, use_eos_token=use_eos_token))
-        #     self.val_data = None
-
-    # # Auxiliary methods
-    # def generate_prompt(self, data_point, **kwargs):
-    #     return make_prompt(
-    #         data_point["instruction"],
-    #         data_point["input"],
-    #         data_point["output"]
-    #     )
-
-    # def generate_and_tokenize_prompt(self, data_point, **kwargs):
-    #     prompt = self.generate_prompt(data_point, **kwargs)
-    #     return self.tokenize(prompt, **kwargs)
 
 
 
