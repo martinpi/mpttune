@@ -7,6 +7,8 @@ from transformers.utils import logging
 
 logger = logging.get_logger("transformers")
 
+TRAIN_EVAL_SPLIT_PERCENT: int = 20
+PROCESSES_LIMIT: int = 1
 
 class TrainDataBase(ABC):
     """
@@ -176,6 +178,141 @@ class TrainSAD(TrainDataBase):
         return self.tokenize(prompt, **kwargs)
 
 
+class TrainLAIKA(TrainDataBase):
+    def __init__(self, dataset: str, val_set_size: int, tokenizer, cutoff_len) -> None:
+        super().__init__(dataset, val_set_size, tokenizer, cutoff_len)
+
+    def tokenize(self, prompt: str, use_eos_token=True, **kwargs) -> Dict[str, Any]:
+        # there's probably a way to do this with the tokenizer settings
+        # but again, gotta move fast
+        if use_eos_token:
+            result = self.tokenizer(
+                prompt + self.tokenizer.eos_token,
+                truncation=True,
+                max_length=self.cutoff_len,
+                padding=False,
+            )
+            if (
+                result["input_ids"][-1] != self.tokenizer.eos_token_id
+                and len(result["input_ids"]) < self.cutoff_len
+            ):
+                result["input_ids"].append(self.tokenizer.eos_token_id)
+                result["attention_mask"].append(1)
+            return result
+        else:
+            result = self.tokenizer(
+                prompt,
+                truncation=True,
+                max_length=self.cutoff_len + 1,
+                padding="max_length",
+            )
+            return {
+                "input_ids": result["input_ids"][:-1],
+                "attention_mask": result["attention_mask"][:-1],
+            }
+
+
+    def prepare_dataset(path_to_file, tokenizer):
+        # disable_progress_bar()
+        data_files = dict()
+        data_files["train"] = path_to_file
+
+        dataset: Dataset = load_dataset(
+            "text", data_files=data_files, keep_linebreaks=True
+        )
+
+        dataset["validation"] = load_dataset(
+            "text",
+            data_files=data_files,
+            split=f"train[:{TRAIN_EVAL_SPLIT_PERCENT}%]",
+        )
+
+        dataset["train"] = load_dataset(
+            "text",
+            data_files=data_files,
+            split=f"train[{TRAIN_EVAL_SPLIT_PERCENT}%:]",
+        )
+
+        column_names = dataset["train"].column_names
+
+        text_column_name: str = "text" if "text" in column_names else column_names[0]
+
+        dataset = dataset.map(
+            encode,
+            batched=True,
+            num_proc=PROCESSES_LIMIT,
+            remove_columns=column_names,
+            desc="Running tokenizer on dataset",
+            fn_kwargs={"tokenizer": tokenizer,
+                    "text_column_name": text_column_name},
+        )
+
+        block_size: int = tokenizer.model_max_length
+        if block_size > 1024:
+            # logger.warning(
+            #     f"The tokenizer picked seems to have a very large `model_max_length` ({tokenizer.model_max_length}). "
+            #     "Picking 1024 instead. You can change that default value by passing --block_size xxx."
+            # )
+            block_size = 1024
+
+        # Note that with `batched=True`, this map processes 1,000 texts together, so group_texts throws away a remainder
+        # for each of those groups of 1,000 texts. You can adjust that batch_size here but a higher value might be slower
+        # to preprocess.
+        #
+        # To speed up this part, we use multiprocessing. See the documentation of the map method for more information:
+        # https://huggingface.co/docs/datasets/package_reference/main_classes.html#datasets.Dataset.map
+
+        lm_datasets: Dataset = dataset.map(
+            group_texts,
+            batched=True,
+            num_proc=PROCESSES_LIMIT,
+            desc=f"Grouping texts in chunks of {block_size}",
+            fn_kwargs={"block_size": block_size},
+        )
+
+        train_dataset: Dataset = lm_datasets["train"]
+
+        eval_dataset: Dataset = lm_datasets["validation"]
+
+        return train_dataset, eval_dataset
+
+    def prepare_data(self, use_eos_token=True, **kwargs) -> None:
+        # data = load_dataset("json", data_files=self.dataset)
+
+        # data = load_dataset(
+        #     "text", data_files=self.dataset, keep_linebreaks=True
+        # )
+
+        self.train_data, self.val_data = prepare_dataset(
+            self.dataset, self.tokenizer
+        )
+
+        # if self.val_set_size > 0:
+        #     train_val = data["train"].train_test_split(
+        #         test_size=self.val_set_size, shuffle=True, seed=42)
+        #     self.train_data = train_val["train"].shuffle().map(
+        #         lambda x: self.generate_and_tokenize_prompt(x, use_eos_token=use_eos_token))
+        #     self.val_data = train_val["validation"].shuffle().map(
+        #         lambda x: self.generate_and_tokenize_prompt(x, use_eos_token=use_eos_token))
+        # else:
+        #     self.train_data = data["train"].shuffle().map(
+        #         lambda x: self.generate_and_tokenize_prompt(x, use_eos_token=use_eos_token))
+        #     self.val_data = None
+
+    # # Auxiliary methods
+    # def generate_prompt(self, data_point, **kwargs):
+    #     return make_prompt(
+    #         data_point["instruction"],
+    #         data_point["input"],
+    #         data_point["output"]
+    #     )
+
+    # def generate_and_tokenize_prompt(self, data_point, **kwargs):
+    #     prompt = self.generate_prompt(data_point, **kwargs)
+    #     return self.tokenize(prompt, **kwargs)
+
+
+
 def make_prompt(instruction, input_, output=""):
     return "{0}\n\n{1}\n{2}\n\n{3}\n{4}\n\n{5}\n{6}".format(
         "Below is an instruction that describes a task, paired with an input that provides further context. Write a response that appropriately completes the request.",
@@ -203,6 +340,12 @@ def load_data(config, tokenizer):
             tokenizer,
             config.cutoff_len)
 
+    elif config.data_type == "LAIKA":
+        data = TrainLAIKA(
+            config.dataset,
+            config.val_set_size,
+            tokenizer,
+            config.cutoff_len)
     else:
         raise ValueError(f"Invalid data name: {config.data_type}")
 
@@ -213,4 +356,5 @@ def load_data(config, tokenizer):
 DATA_TYPES = [
     "alpaca",
     "gpt4all",
+    "LAIKA",
 ]
