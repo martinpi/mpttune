@@ -283,7 +283,7 @@ class TrainLAIKA(TrainDataBase):
         #     "text", data_files=self.dataset, keep_linebreaks=True
         # )
 
-        self.train_data, self.val_data = prepare_dataset(
+        self.train_data, self.val_data = self.prepare_dataset(
             self.dataset, self.tokenizer
         )
 
