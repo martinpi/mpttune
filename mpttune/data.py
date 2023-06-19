@@ -212,7 +212,11 @@ class TrainLAIKA(TrainDataBase):
             }
 
 
-    def prepare_dataset(path_to_file, tokenizer):
+    def encode(self, examples, tokenizer, text_column_name):
+        return tokenizer(examples[text_column_name])
+
+
+    def prepare_dataset(self, path_to_file, tokenizer):
         # disable_progress_bar()
         data_files = dict()
         data_files["train"] = path_to_file
@@ -238,7 +242,7 @@ class TrainLAIKA(TrainDataBase):
         text_column_name: str = "text" if "text" in column_names else column_names[0]
 
         dataset = dataset.map(
-            encode,
+            self.encode,
             batched=True,
             num_proc=PROCESSES_LIMIT,
             remove_columns=column_names,
